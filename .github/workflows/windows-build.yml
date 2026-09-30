@@ -15,6 +15,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Extract uploaded source archive
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -File -Filter '*fixed-source-github-actions.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'Source ZIP was not found in repository root.' }
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath .\_source -Force
+          $root = Get-ChildItem .\_source -Directory | Select-Object -First 1
+          if (-not $root) { throw 'Source archive has no root directory.' }
+          Get-ChildItem $root.FullName -Force | ForEach-Object { Copy-Item $_.FullName . -Recurse -Force }
+          Remove-Item .\_source -Recurse -Force
+          Remove-Item $zip.FullName -Force
+
       - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
         with:
@@ -25,11 +37,7 @@ jobs:
         run: dotnet restore PdfStudio/PdfStudio.csproj --runtime win-x64
       - name: Publish self-contained single-file EXE
         run: >
-          dotnet publish PdfStudio/PdfStudio.csproj
-          -c Release -r win-x64 --self-contained true
-          -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
-          -o publish --no-restore
+          dotnet publish PdfStudio/PdfStudio.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish --no-restore
       - name: Automatic PDF self-test
         shell: pwsh
         run: |
@@ -41,7 +49,7 @@ jobs:
           $version = (Get-Content VERSION).Trim()
           $exe = "PDF-Studio-CSharp-$version-win-x64.exe"
           Move-Item .\publish\PDF-Studio-CSharp.exe ".\publish\$exe"
-          Compress-Archive -Force -Path ".\publish\$exe",".\README.md",".\CHANGELOG.md",".\THIRD_PARTY_NOTICES.md" -DestinationPath ".\publish\PDF-Studio-CSharp-$version-win-x64.zip"
+          Compress-Archive -Force -Path ".\publish\$exe" -DestinationPath ".\publish\PDF-Studio-CSharp-$version-win-x64.zip"
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Build Windows installer
@@ -53,10 +61,7 @@ jobs:
       - name: Create SHA256 checksums
         shell: pwsh
         run: |
-          Get-ChildItem .\publish -File | Where-Object { $_.Extension -in '.exe', '.zip' } | ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
-            "$hash  $($_.Name)"
-          } | Set-Content .\publish\SHA256SUMS.txt
+          Get-ChildItem .\publish -File | Where-Object { $_.Extension -in '.exe', '.zip' } | ForEach-Object { $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash; "$hash  $($_.Name)" } | Set-Content .\publish\SHA256SUMS.txt
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
