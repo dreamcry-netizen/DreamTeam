@@ -39,8 +39,8 @@ jobs:
           {
               var candidates = new[]
               {
-                  Path.Combine(AppContext.BaseDirectory, "ocr", "tesseract.exe"),
-                  Path.Combine(AppContext.BaseDirectory, "tesseract.exe"),
+                  System.IO.Path.Combine(AppContext.BaseDirectory, "ocr", "tesseract.exe"),
+                  System.IO.Path.Combine(AppContext.BaseDirectory, "tesseract.exe"),
                   Environment.GetEnvironmentVariable("TESSERACT_PATH")
               };
               foreach (var candidate in candidates)
