@@ -56,6 +56,7 @@ jobs:
           }
           $text = [regex]::Replace($text, 'FileName\s*=\s*"tesseract"', 'FileName = ResolveTesseractPath()', 1)
           Set-Content $file $text -Encoding UTF8
+
       - name: Restore
         run: dotnet restore PdfStudio/PdfStudio.csproj --runtime win-x64
 
@@ -73,8 +74,15 @@ jobs:
           if (-not (Test-Path (Join-Path $ocr 'tesseract.exe'))) { throw "Tesseract executable not found in $ocr" }
           New-Item -ItemType Directory -Path .\publish\ocr -Force | Out-Null
           Copy-Item "$ocr\*" .\publish\ocr -Recurse -Force
-          if (-not (Test-Path .\publish\ocr\tessdata\rus.traineddata)) { throw 'Russian OCR language data rus.traineddata is missing.' }
-          if (-not (Test-Path .\publish\ocr\tessdata\eng.traineddata)) { throw 'English OCR language data eng.traineddata is missing.' }
+          $tessdata = '.\publish\ocr\tessdata'
+          New-Item -ItemType Directory -Path $tessdata -Force | Out-Null
+          foreach ($lang in @('eng','rus')) {
+            $target = Join-Path $tessdata "$lang.traineddata"
+            if (-not (Test-Path $target)) {
+              Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/$lang.traineddata" -OutFile $target
+            }
+            if (-not (Test-Path $target)) { throw "$lang.traineddata is missing." }
+          }
 
       - name: Automatic PDF self-test
         shell: pwsh
