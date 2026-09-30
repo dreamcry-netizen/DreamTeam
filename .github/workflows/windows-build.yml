@@ -90,7 +90,7 @@ jobs:
           }
 
           if ($text -notmatch 'var tesseractPath\s*=\s*ResolveTesseractPath\(\)') {
-            $text = $text.Replace('var startInfo = new ProcessStartInfo', 'var tesseractPath = ResolveTesseractPath()' + [Environment]::NewLine + '          var startInfo = new ProcessStartInfo', 1)
+            $text = $text.Replace('var startInfo = new ProcessStartInfo', 'var tesseractPath = ResolveTesseractPath();' + [Environment]::NewLine + '          var startInfo = new ProcessStartInfo', 1)
           }
 
           if ($text -notmatch 'WorkingDirectory\s*=\s*System\.IO\.Path\.GetDirectoryName\(tesseractPath\)') {
