@@ -28,34 +28,75 @@ jobs:
           Remove-Item .\_source -Recurse -Force
           Remove-Item $zip.FullName -Force
 
-      - name: Patch OCR to prefer bundled Tesseract
+      - name: Patch OCR resolver and version
         shell: pwsh
         run: |
           $file = 'PdfStudio\MainWindow.xaml.cs'
           $text = Get-Content $file -Raw
-          if ($text -notmatch 'FileName\s*=\s*"tesseract"') { throw 'The expected Tesseract ProcessStartInfo was not found.' }
           $helper = @'
           private static string ResolveTesseractPath()
           {
-              var candidates = new[]
+              var candidates = new List<string?>
               {
                   System.IO.Path.Combine(AppContext.BaseDirectory, "ocr", "tesseract.exe"),
                   System.IO.Path.Combine(AppContext.BaseDirectory, "tesseract.exe"),
-                  Environment.GetEnvironmentVariable("TESSERACT_PATH")
+                  Environment.GetEnvironmentVariable("TESSERACT_PATH"),
+                  System.IO.Path.Combine(Environment.CurrentDirectory, "ocr", "tesseract.exe"),
+                  System.IO.Path.Combine(Environment.CurrentDirectory, "tesseract.exe")
               };
+              var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+              if (!string.IsNullOrWhiteSpace(programFiles))
+                  candidates.Add(System.IO.Path.Combine(programFiles, "Tesseract-OCR", "tesseract.exe"));
+              var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+              if (!string.IsNullOrWhiteSpace(programFilesX86))
+                  candidates.Add(System.IO.Path.Combine(programFilesX86, "Tesseract-OCR", "tesseract.exe"));
+              var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+              if (!string.IsNullOrWhiteSpace(localAppData))
+                  candidates.Add(System.IO.Path.Combine(localAppData, "Programs", "Tesseract-OCR", "tesseract.exe"));
               foreach (var candidate in candidates)
               {
-                  if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate)) return candidate;
+                  if (string.IsNullOrWhiteSpace(candidate)) continue;
+                  var normalized = candidate.Trim().Trim('"');
+                  if (Directory.Exists(normalized))
+                      normalized = System.IO.Path.Combine(normalized, "tesseract.exe");
+                  if (File.Exists(normalized))
+                      return System.IO.Path.GetFullPath(normalized);
               }
-              return "tesseract";
+              throw new FileNotFoundException("Tesseract OCR не найден.");
           }
 
           '@
-          if ($text -notmatch 'ResolveTesseractPath\(') {
-            $text = [regex]::Replace($text, '(?m)^\s*(private\s+static\s+async\s+Task<string>\s+RunTesseractAsync\s*\()', $helper + '$1', 1)
+          $pattern = '(?s)private static string ResolveTesseractPath\(\).*?(?=\r?\n\s*private static async Task<string> RunTesseractAsync)'
+          if ($text -match $pattern) {
+            $text = [regex]::Replace($text, $pattern, $helper.TrimEnd(), 1)
+          } else {
+            throw 'ResolveTesseractPath method was not found.'
           }
           $text = [regex]::Replace($text, 'FileName\s*=\s*"tesseract"', 'FileName = ResolveTesseractPath()', 1)
+          $startPattern = '(?s)var startInfo = new ProcessStartInfo\s*\{.*?RedirectStandardError = true\s*\};'
+          $startReplacement = @'
+          var startInfo = new ProcessStartInfo
+          {
+              FileName = tesseractPath,
+              WorkingDirectory = System.IO.Path.GetDirectoryName(tesseractPath) ?? AppContext.BaseDirectory,
+              UseShellExecute = false,
+              CreateNoWindow = true,
+              RedirectStandardOutput = true,
+              RedirectStandardError = true
+          };
+          var tessdata = System.IO.Path.Combine(
+              System.IO.Path.GetDirectoryName(tesseractPath) ?? AppContext.BaseDirectory, "tessdata");
+          if (Directory.Exists(tessdata))
+              startInfo.Environment["TESSDATA_PREFIX"] = tessdata;
+          '@
+          $text = [regex]::Replace($text, $startPattern, $startReplacement.TrimEnd(), 1)
+          $text = $text -replace 'RunDiagnosticProcessAsync\("tesseract",', 'RunDiagnosticProcessAsync(ResolveTesseractPath(),'
           Set-Content $file $text -Encoding UTF8
+          Set-Content VERSION '1.0.0-beta.4' -Encoding UTF8
+          $csproj = 'PdfStudio\PdfStudio.csproj'
+          $project = Get-Content $csproj -Raw
+          $project = [regex]::Replace($project, '<Version>[^<]+</Version>', '<Version>1.0.0-beta.4</Version>', 1)
+          Set-Content $csproj $project -Encoding UTF8
 
       - name: Restore
         run: dotnet restore PdfStudio/PdfStudio.csproj --runtime win-x64
