@@ -33,24 +33,8 @@ jobs:
         run: |
           $file = 'PdfStudio\MainWindow.xaml.cs'
           $text = Get-Content $file -Raw
-          $old = @'
-          private static async Task<string> RunTesseractAsync(
-              string inputPath,
-              string outputBase,
-              string language,
-              string psm,
-              CancellationToken cancellationToken)
-          {
-              var startInfo = new ProcessStartInfo
-              {
-                  FileName = "tesseract",
-                  UseShellExecute = false,
-                  CreateNoWindow = true,
-                  RedirectStandardOutput = true,
-                  RedirectStandardError = true
-              };
-          '@
-          $new = @'
+          if ($text -notmatch 'FileName\s*=\s*"tesseract"') { throw 'The expected Tesseract ProcessStartInfo was not found.' }
+          $helper = @'
           private static string ResolveTesseractPath()
           {
               var candidates = new[]
@@ -59,38 +43,19 @@ jobs:
                   Path.Combine(AppContext.BaseDirectory, "tesseract.exe"),
                   Environment.GetEnvironmentVariable("TESSERACT_PATH")
               };
-
               foreach (var candidate in candidates)
               {
-                  if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
-                      return candidate;
+                  if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate)) return candidate;
               }
-
               return "tesseract";
           }
 
-          private static async Task<string> RunTesseractAsync(
-              string inputPath,
-              string outputBase,
-              string language,
-              string psm,
-              CancellationToken cancellationToken)
-          {
-              var tesseractPath = ResolveTesseractPath();
-              var startInfo = new ProcessStartInfo
-              {
-                  FileName = tesseractPath,
-                  WorkingDirectory = Path.GetDirectoryName(tesseractPath) ?? AppContext.BaseDirectory,
-                  UseShellExecute = false,
-                  CreateNoWindow = true,
-                  RedirectStandardOutput = true,
-                  RedirectStandardError = true
-              };
           '@
-          if (-not $text.Contains($old)) { throw 'Expected OCR method block was not found.' }
-          $text = $text.Replace($old, $new)
+          if ($text -notmatch 'ResolveTesseractPath\(') {
+            $text = [regex]::Replace($text, '(?m)^\s*(private\s+static\s+async\s+Task<string>\s+RunTesseractAsync\s*\()', $helper + '$1', 1)
+          }
+          $text = [regex]::Replace($text, 'FileName\s*=\s*"tesseract"', 'FileName = ResolveTesseractPath()', 1)
           Set-Content $file $text -Encoding UTF8
-
       - name: Restore
         run: dotnet restore PdfStudio/PdfStudio.csproj --runtime win-x64
 
