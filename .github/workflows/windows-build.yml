@@ -15,6 +15,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Extract uploaded source archive
         shell: pwsh
         run: |
@@ -27,43 +28,142 @@ jobs:
           Remove-Item .\_source -Recurse -Force
           Remove-Item $zip.FullName -Force
 
-      - name: Setup .NET 8 SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 8.0.425
-          cache: true
-          cache-dependency-path: PdfStudio/PdfStudio.csproj
+      - name: Patch OCR to prefer bundled Tesseract
+        shell: pwsh
+        run: |
+          $file = 'PdfStudio\MainWindow.xaml.cs'
+          $text = Get-Content $file -Raw
+          $old = @'
+          private static async Task<string> RunTesseractAsync(
+              string inputPath,
+              string outputBase,
+              string language,
+              string psm,
+              CancellationToken cancellationToken)
+          {
+              var startInfo = new ProcessStartInfo
+              {
+                  FileName = "tesseract",
+                  UseShellExecute = false,
+                  CreateNoWindow = true,
+                  RedirectStandardOutput = true,
+                  RedirectStandardError = true
+              };
+          '@
+          $new = @'
+          private static string ResolveTesseractPath()
+          {
+              var candidates = new[]
+              {
+                  Path.Combine(AppContext.BaseDirectory, "ocr", "tesseract.exe"),
+                  Path.Combine(AppContext.BaseDirectory, "tesseract.exe"),
+                  Environment.GetEnvironmentVariable("TESSERACT_PATH")
+              };
+
+              foreach (var candidate in candidates)
+              {
+                  if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
+                      return candidate;
+              }
+
+              return "tesseract";
+          }
+
+          private static async Task<string> RunTesseractAsync(
+              string inputPath,
+              string outputBase,
+              string language,
+              string psm,
+              CancellationToken cancellationToken)
+          {
+              var tesseractPath = ResolveTesseractPath();
+              var startInfo = new ProcessStartInfo
+              {
+                  FileName = tesseractPath,
+                  WorkingDirectory = Path.GetDirectoryName(tesseractPath) ?? AppContext.BaseDirectory,
+                  UseShellExecute = false,
+                  CreateNoWindow = true,
+                  RedirectStandardOutput = true,
+                  RedirectStandardError = true
+              };
+          '@
+          if (-not $text.Contains($old)) { throw 'Expected OCR method block was not found.' }
+          $text = $text.Replace($old, $new)
+          Set-Content $file $text -Encoding UTF8
+
       - name: Restore
         run: dotnet restore PdfStudio/PdfStudio.csproj --runtime win-x64
+
       - name: Publish self-contained single-file EXE
         run: >
-          dotnet publish PdfStudio/PdfStudio.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish --no-restore
+          dotnet publish PdfStudio/PdfStudio.csproj -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -o publish --no-restore
+
+      - name: Install Tesseract OCR
+        shell: pwsh
+        run: |
+          choco install tesseract --version=5.5.3.20260724 -y --no-progress
+          $ocr = Join-Path $env:ProgramFiles 'Tesseract-OCR'
+          if (-not (Test-Path (Join-Path $ocr 'tesseract.exe'))) { throw "Tesseract executable not found in $ocr" }
+          New-Item -ItemType Directory -Path .\publish\ocr -Force | Out-Null
+          Copy-Item "$ocr\*" .\publish\ocr -Recurse -Force
+          if (-not (Test-Path .\publish\ocr\tessdata\rus.traineddata)) { throw 'Russian OCR language data rus.traineddata is missing.' }
+          if (-not (Test-Path .\publish\ocr\tessdata\eng.traineddata)) { throw 'English OCR language data eng.traineddata is missing.' }
+
       - name: Automatic PDF self-test
         shell: pwsh
         run: |
           & .\publish\PDF-Studio-CSharp.exe --self-test-auto
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Package application
+
+      - name: OCR smoke test
+        shell: pwsh
+        run: |
+          & .\publish\ocr\tesseract.exe --version
+          & .\publish\ocr\tesseract.exe --list-langs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare installer source
+        shell: pwsh
+        run: |
+          $iss = 'installer.iss'
+          $text = Get-Content $iss -Raw
+          if (-not $text.Contains('Source: "publish\ocr\*";')) {
+            $needle = 'Source: "publish\{#MyAppExe}"; DestDir: "{app}"; Flags: ignoreversion'
+            $replacement = $needle + [Environment]::NewLine + 'Source: "publish\ocr\*"; DestDir: "{app}\ocr"; Flags: ignoreversion recursesubdirs createallsubdirs'
+            if (-not $text.Contains($needle)) { throw 'Installer EXE source line was not found.' }
+            $text = $text.Replace($needle, $replacement)
+            Set-Content $iss $text -Encoding UTF8
+          }
+
+      - name: Package application with bundled OCR
         shell: pwsh
         run: |
           $version = (Get-Content VERSION).Trim()
           $exe = "PDF-Studio-CSharp-$version-win-x64.exe"
           Move-Item .\publish\PDF-Studio-CSharp.exe ".\publish\$exe"
-          Compress-Archive -Force -Path ".\publish\$exe" -DestinationPath ".\publish\PDF-Studio-CSharp-$version-win-x64.zip"
+          Compress-Archive -Force -Path ".\publish\*" -DestinationPath ".\publish\PDF-Studio-CSharp-$version-win-x64.zip"
+
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
+
       - name: Build Windows installer
         shell: pwsh
         run: |
           $version = (Get-Content VERSION).Trim()
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$version" installer.iss
+          $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+          & (Join-Path $pf86 'Inno Setup 6\ISCC.exe') "/DMyAppVersion=$version" installer.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Create SHA256 checksums
         shell: pwsh
         run: |
-          Get-ChildItem .\publish -File | Where-Object { $_.Extension -in '.exe', '.zip' } | ForEach-Object { $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash; "$hash  $($_.Name)" } | Set-Content .\publish\SHA256SUMS.txt
-      - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+          Get-ChildItem .\publish -File | Where-Object { $_.Extension -in '.exe', '.zip' } |
+            ForEach-Object { $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash; "$hash  $($_.Name)" } |
+            Set-Content .\publish\SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
         with:
           name: PDF-Studio-CSharp-win-x64
           path: |
